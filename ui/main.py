@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
-import requests
+import sqlite3
 import io
 from typing import List, Dict, Any
 import math
 import plotly.express as px
 import plotly.graph_objects as go
+import os
 
 # -------------------------
 # Вспомогательные стили/утилиты UI
@@ -48,28 +49,28 @@ def _inject_base_css() -> None:
             border-radius: 12px;
             border: 1px solid rgba(0,0,0,0.07);
             box-shadow: 0 6px 18px rgba(0,0,0,0.06);
-            padding: 14px 14px 12px 14px;
+            padding: 18px 18px 16px 18px;
             margin-bottom: 12px;
         }
         .card-title {
-            font-size: 16px;
+            font-size: 18px;
             font-weight: 700;
-            margin: 0 0 6px 0;
+            margin: 0 0 8px 0;
         }
-        .card-subtitle { font-size: 12px; color: #475569; margin-bottom: 10px; }
+        .card-subtitle { font-size: 14px; color: #475569; margin-bottom: 12px; }
         .pill {
             display: inline-block;
-            padding: 3px 8px;
+            padding: 4px 10px;
             border-radius: 999px;
             background: #f1f5f9;
             color: #0f172a;
-            font-size: 11px;
+            font-size: 13px;
             border: 1px solid #e2e8f0;
-            margin-right: 6px;
-            margin-bottom: 6px;
+            margin-right: 8px;
+            margin-bottom: 8px;
         }
-        .row-divider { height: 6px; }
-        .ext-link a { text-decoration: none; font-size: 12px; }
+        .row-divider { height: 8px; }
+        .ext-link a { text-decoration: none; font-size: 14px; }
         .ext-link a:hover { text-decoration: underline; }
         </style>
         """,
@@ -91,38 +92,50 @@ def _render_kpi(label: str, value: str, sub: str = "") -> None:
     )
 
 
-def _get_totals(api_base: str) -> Dict[str, Any]:
-    """Возвращает агрегированные счетчики для шапки: метаболиты, ферменты и статус API."""
-    totals = {"metabolites": None, "enzymes": None, "api_status": "unknown"}
-
-    # Статус API
+def _get_database_connection():
+    """Создает подключение к базе данных"""
     try:
-        resp = requests.get(f"{api_base}/health", timeout=5)
-        if resp.ok:
-            data = resp.json()
-            totals["api_status"] = data.get("status", "unknown")
-            # Бонус: некоторые реализации возвращают metabolites_count
-            if data.get("metabolites_count") is not None:
-                totals["metabolites"] = int(data["metabolites_count"])
-    except Exception:
-        totals["api_status"] = "offline"
+        # Проверяем существование файла
+        if not os.path.exists(DATABASE_PATH):
+            return None
+            
+        return sqlite3.connect(DATABASE_PATH)
+    except Exception as e:
+        return None
 
-    # Общее число метаболитов через поиск (если не получили из /health)
-    if totals["metabolites"] is None:
-        try:
-            resp = requests.get(f"{api_base}/metabolites/search", params={"page_size": 1}, timeout=10)
-            if resp.ok:
-                totals["metabolites"] = int(resp.json().get("total", 0))
-        except Exception:
-            totals["metabolites"] = None
+def _get_totals() -> Dict[str, Any]:
+    """Возвращает агрегированные счетчики для шапки: метаболиты, ферменты и статус БД."""
+    totals = {"metabolites": None, "enzymes": None, "db_status": "unknown"}
 
-    # Общее число ферментов
     try:
-        resp = requests.get(f"{api_base}/enzymes/search", params={"page_size": 1}, timeout=10)
-        if resp.ok:
-            totals["enzymes"] = int(resp.json().get("total", 0))
+        conn = _get_database_connection()
+        if conn is None:
+            totals["db_status"] = "offline"
+            return totals
+        
+        # Получаем список всех таблиц
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [row[0] for row in cursor.fetchall()]
+        
+        # Ищем таблицы с метаболитами и ферментами
+        for table in tables:
+            try:
+                cursor = conn.execute(f"SELECT COUNT(*) FROM {table}")
+                count = cursor.fetchone()[0]
+                
+                if "metabolite" in table.lower() or "compound" in table.lower():
+                    totals["metabolites"] = count
+                elif "enzyme" in table.lower() or "protein" in table.lower():
+                    totals["enzymes"] = count
+                    
+            except Exception:
+                continue
+        
+        conn.close()
+        totals["db_status"] = "healthy"
+        
     except Exception:
-        totals["enzymes"] = None
+        totals["db_status"] = "offline"
 
     return totals
 
@@ -188,17 +201,205 @@ def _render_enzyme_card(e: Dict[str, Any]) -> None:
         unsafe_allow_html=True,
     )
 
-# Конфигурация API
-import os
+def _search_metabolites(query: str = None, mass: float = None, tol_ppm: int = 10, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+    """Поиск метаболитов в базе данных"""
+    try:
+        conn = _get_database_connection()
+        if not conn:
+            return {"error": "Database connection failed"}
+        
+        # Пытаемся найти таблицу metabolites
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%metabolite%'")
+        metabolite_tables = [row[0] for row in cursor.fetchall()]
+        
+        if not metabolite_tables:
+            return {"error": "No metabolite tables found"}
+        
+        table_name = metabolite_tables[0]  # Берем первую найденную таблицу
+        
+        # Получаем структуру таблицы
+        cursor = conn.execute(f"PRAGMA table_info({table_name})")
+        columns = [row[1] for row in cursor.fetchall()]
+        
+        # Базовый запрос
+        base_query = f"SELECT * FROM {table_name} WHERE 1=1"
+        params = []
+        
+        # Поиск по тексту
+        if query:
+            # Ищем поля для текстового поиска
+            text_fields = [col for col in columns if any(keyword in col.lower() for keyword in ['name', 'formula', 'class'])]
+            if text_fields:
+                search_conditions = [f"{col} LIKE ?" for col in text_fields]
+                base_query += " AND (" + " OR ".join(search_conditions) + ")"
+                params.extend([f"%{query}%" for _ in text_fields])
+        
+        # Поиск по массе
+        if mass:
+            # Ищем поле для массы
+            mass_fields = [col for col in columns if any(keyword in col.lower() for keyword in ['mass', 'weight', 'mz'])]
+            if mass_fields:
+                mass_field = mass_fields[0]
+                tolerance = mass * tol_ppm / 1000000
+                base_query += f" AND {mass_field} BETWEEN ? AND ?"
+                params.extend([mass - tolerance, mass + tolerance])
+        
+        # Подсчет общего количества
+        count_query = f"SELECT COUNT(*) FROM ({base_query})"
+        cursor = conn.execute(count_query, params)
+        total = cursor.fetchone()[0]
+        
+        # Добавляем пагинацию
+        base_query += " LIMIT ? OFFSET ?"
+        params.extend([page_size, (page - 1) * page_size])
+        
+        # Выполняем основной запрос
+        cursor = conn.execute(base_query, params)
+        results = []
+        
+        for row in cursor.fetchall():
+            row_dict = {}
+            for i, col in enumerate(columns):
+                row_dict[col] = row[i]
+            results.append(row_dict)
+        
+        conn.close()
+        
+        return {
+            "metabolites": results,
+            "total": total,
+            "page": page,
+            "page_size": page_size
+        }
+        
+    except Exception as e:
+        return {"error": f"Metabolite search failed: {str(e)}"}
 
-# 🔧 НАСТРОЙКА API URL:
-# 1. Создайте файл .env в папке ui/ с содержимым:
-#    API_BASE_URL=https://your-real-app-name.streamlit.app
-# 2. Или установите переменную окружения:
-#    export API_BASE_URL=https://your-real-app-name.streamlit.app
-# 3. Или замените значение по умолчанию ниже на реальный URL
+def _search_enzymes(query: str = None, organism_type: str = None, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+    """Поиск ферментов в базе данных"""
+    try:
+        conn = _get_database_connection()
+        if not conn:
+            return {"error": "Database connection failed"}
+        
+        # Пытаемся найти таблицу enzymes
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%enzyme%'")
+        enzyme_tables = [row[0] for row in cursor.fetchall()]
+        
+        if not enzyme_tables:
+            return {"error": "No enzyme tables found"}
+        
+        table_name = enzyme_tables[0]  # Берем первую найденную таблицу
+        
+        # Получаем структуру таблицы
+        cursor = conn.execute(f"PRAGMA table_info({table_name})")
+        columns = [row[1] for row in cursor.fetchall()]
+        
+        # Базовый запрос
+        base_query = f"SELECT * FROM {table_name} WHERE 1=1"
+        params = []
+        
+        # Поиск по тексту
+        if query:
+            # Ищем поля для текстового поиска
+            text_fields = [col for col in columns if any(keyword in col.lower() for keyword in ['name', 'ec', 'family'])]
+            if text_fields:
+                search_conditions = [f"{col} LIKE ?" for col in text_fields]
+                base_query += " AND (" + " OR ".join(search_conditions) + ")"
+                params.extend([f"%{query}%" for _ in text_fields])
+        
+        # Фильтр по типу организма
+        if organism_type and organism_type != "Все":
+            # Ищем поле для типа организма
+            org_fields = [col for col in columns if any(keyword in col.lower() for keyword in ['organism', 'type', 'species'])]
+            if org_fields:
+                org_field = org_fields[0]
+                base_query += f" AND {org_field} LIKE ?"
+                params.append(f"%{organism_type}%")
+        
+        # Подсчет общего количества
+        count_query = f"SELECT COUNT(*) FROM ({base_query})"
+        cursor = conn.execute(count_query, params)
+        total = cursor.fetchone()[0]
+        
+        # Добавляем пагинацию
+        base_query += " LIMIT ? OFFSET ?"
+        params.extend([page_size, (page - 1) * page_size])
+        
+        # Выполняем основной запрос
+        cursor = conn.execute(base_query, params)
+        results = []
+        
+        for row in cursor.fetchall():
+            row_dict = {}
+            for i, col in enumerate(columns):
+                row_dict[col] = row[i]
+            results.append(row_dict)
+        
+        conn.close()
+        
+        return {
+            "enzymes": results,
+            "total": total,
+            "page": page,
+            "page_size": page_size
+        }
+        
+    except Exception as e:
+        return {"error": f"Enzyme search failed: {str(e)}"}
 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://protein-api-app-qsmxhj6iwhkpecgluvjajp.streamlit.app/")
+def _annotate_csv_data(file_content: bytes, mz_column: str, tol_ppm: int = 10) -> Dict[str, Any]:
+    """Аннотация CSV данных метаболитами"""
+    try:
+        # Читаем CSV
+        df = pd.read_csv(io.BytesIO(file_content))
+        
+        if mz_column not in df.columns:
+            return {"error": f"Column {mz_column} not found in CSV"}
+        
+        # Получаем массы
+        mz_values = df[mz_column].astype(float).tolist()
+        
+        # Аннотируем каждую массу
+        annotated_items = []
+        for mz in mz_values:
+            # Ищем метаболиты по массе
+            metabolites = _search_metabolites(mass=mz, tol_ppm=tol_ppm, page_size=5)
+            
+            if "error" not in metabolites and metabolites.get("metabolites"):
+                candidates = [met.get("name", "Unknown") for met in metabolites["metabolites"]]
+                best_match = metabolites["metabolites"][0] if metabolites["metabolites"] else None
+            else:
+                candidates = []
+                best_match = None
+            
+            annotated_items.append({
+                "mz": mz,
+                "candidates": candidates,
+                "best_match": best_match
+            })
+        
+        return {
+            "items": annotated_items,
+            "total_annotated": len(annotated_items),
+            "tolerance_ppm": tol_ppm
+        }
+        
+    except Exception as e:
+        return {"error": f"CSV annotation failed: {str(e)}"}
+
+# Конфигурация базы данных
+# 🔧 НАСТРОЙКА ПУТИ К БД:
+# ✅ УСТАНОВЛЕНО: metabolome.db
+# 
+# Для изменения используйте:
+# 1. Файл .env в папке ui/ с содержимым:
+#    DATABASE_PATH=path/to/your/database.db
+# 2. Или переменную окружения:
+#    export DATABASE_PATH=path/to/your/database.db
+# 3. Или замените значение по умолчанию ниже
+
+DATABASE_PATH = os.getenv("DATABASE_PATH", "data/metabolome.db")
 
 # Настройка страницы
 st.set_page_config(
@@ -210,8 +411,24 @@ st.set_page_config(
 
 # Заголовок и базовые стили
 _inject_base_css()
-st.title("🧬 Метаболомный справочник")
-st.markdown("**Учебное приложение для анализа метаболитов и аннотации данных LC-MS**")
+
+# Проверка наличия базы данных
+if not os.path.exists(DATABASE_PATH):
+    st.error(f"❌ **База данных не найдена!**")
+    st.markdown(f"""
+    Файл `{DATABASE_PATH}` не найден в текущей директории.
+    
+    **Для решения:**
+    1. Убедитесь, что файл базы данных находится в папке `ui/`
+    2. Или измените переменную `DATABASE_PATH` в коде
+    3. Или создайте файл `.env` с содержимым: `DATABASE_PATH=path/to/your/database.db`
+    
+    **Текущий путь:** `{os.path.abspath(DATABASE_PATH)}`
+    """)
+    st.stop()
+
+st.title("🧬 Метаболомный справочник (Локальная версия)")
+st.markdown("**Учебное приложение для анализа метаболитов и аннотации данных LC-MS - работает напрямую с базой данных**")
 
 # Отладочная информация (удалить в продакшене)
 # with st.expander("🔍 DEBUG: Состояние session_state"):
@@ -226,20 +443,20 @@ st.markdown("**Учебное приложение для анализа мет�
 #     st.write(f"- enz_view_mode: {st.session_state.get('enz_view_mode', 'не установлен')}")
 
 # KPI панель
-totals = _get_totals(API_BASE_URL)
+totals = _get_totals()
 col_k1, col_k2, col_k3 = st.columns(3)
 with col_k1:
     _render_kpi("Метаболиты", f"{totals.get('metabolites') if totals.get('metabolites') is not None else '—'}", "общее количество в БД")
 with col_k2:
     _render_kpi("Ферменты", f"{totals.get('enzymes') if totals.get('enzymes') is not None else '—'}", "общее количество в БД")
 with col_k3:
-    status = totals.get("api_status", "unknown")
+    status = totals.get("db_status", "unknown")
     status_ru = "онлайн" if status == "healthy" else ("офлайн" if status == "offline" else status)
-    _render_kpi("Статус API", status_ru, "сервис /health")
+    _render_kpi("Статус БД", status_ru, "подключение к базе данных")
 
 # Боковая панель - Унифицированный поиск
 st.sidebar.markdown("## 🔍 **Поиск**")
-st.sidebar.markdown("*Унифицированный интерфейс для поиска метаболитов и ферментов*")
+st.sidebar.markdown("*Унифицированный интерфейс для поиска метаболитов и ферментов в локальной БД*")
 
 # Инициализация state
 if "met_page" not in st.session_state:
@@ -350,23 +567,13 @@ if search_type == "🧬 Метаболиты":
             st.session_state.last_tolerance_ppm = tolerance_ppm
             
             # Выполняем поиск и сохраняем результаты
-            try:
-                params = {"page": 1, "page_size": st.session_state.met_page_size}
-                if search_query:
-                    params["q"] = search_query
-                if mass_query:
-                    params["mass"] = mass_query
-                if tolerance_ppm:
-                    params["tol_ppm"] = tolerance_ppm
-                
-                response = requests.get(f"{API_BASE_URL}/metabolites/search", params=params)
-                if response.status_code == 200:
-                    data = response.json()
-                    st.session_state.met_search_results = data.get("metabolites", [])
-                    st.session_state.met_total_results = data.get("total", 0)
-                    st.rerun()
-            except Exception:
-                pass
+            data = _search_metabolites(search_query, mass_query, tolerance_ppm, 1, st.session_state.met_page_size)
+            if "error" not in data:
+                st.session_state.met_search_results = data.get("metabolites", [])
+                st.session_state.met_total_results = data.get("total", 0)
+                st.rerun()
+            else:
+                st.error(f"Ошибка поиска: {data['error']}")
 
 # Форма поиска ферментов
 elif search_type == "🧪 Ферменты":
@@ -445,48 +652,35 @@ elif search_type == "🧪 Ферменты":
         
         if submitted:
             if enzyme_query or organism_type != "Все":
-                try:
-                    # Параметры запроса
-                    params = {"page_size": st.session_state.enz_page_size, "page": st.session_state.enz_page}
-                    if enzyme_query:
-                        params["q"] = enzyme_query
-                    if organism_type != "Все":
-                        params["organism_type"] = organism_type
+                # Выполняем поиск ферментов
+                data = _search_enzymes(enzyme_query, organism_type, 1, st.session_state.enz_page_size)
+                
+                if "error" not in data:
+                    enzymes = data.get("enzymes", [])
+                    total = data.get("total", 0)
+                    total_pages = max(1, math.ceil(total / st.session_state.enz_page_size))
                     
-                    # Запрос к API
-                    response = requests.get(f"{API_BASE_URL}/enzymes/search", params=params)
+                    # Сохраняем результаты для использования вне формы
+                    st.session_state.enz_search_results = enzymes
+                    st.session_state.enz_total_results = total
+                    st.session_state.enz_total_pages = total_pages
+                    st.session_state.enz_last_query = enzyme_query
+                    st.session_state.enz_last_organism_type = organism_type
+                    st.session_state.enz_search_submitted = True
                     
-                    if response.status_code == 200:
-                        data = response.json()
-                        enzymes = data.get("enzymes", [])
-                        total = data.get("total", 0)
-                        total_pages = max(1, math.ceil(total / st.session_state.enz_page_size))
-                        
-                        # Сохраняем результаты для использования вне формы
-                        st.session_state.enz_search_results = enzymes
-                        st.session_state.enz_total_results = total
-                        st.session_state.enz_total_pages = total_pages
-                        st.session_state.enz_last_query = enzyme_query
-                        st.session_state.enz_last_organism_type = organism_type
-                        st.session_state.enz_search_submitted = True
-                        
-                        if enzymes:
-                            st.success(f"✅ Найдено {total} ферментов")
-                        else:
-                            st.warning("🔍 Ферменты не найдены. Попробуйте изменить параметры поиска.")
+                    if enzymes:
+                        st.success(f"✅ Найдено {total} ферментов")
                     else:
-                        st.error(f"❌ Ошибка поиска: {response.status_code}")
-                        
-                except requests.exceptions.RequestException:
-                    st.error("❌ Не удается подключиться к API серверу")
-                except Exception as e:
-                    st.error(f"❌ Ошибка: {str(e)}")
+                        st.warning("🔍 Ферменты не найдены. Попробуйте изменить параметры поиска.")
+                else:
+                    st.error(f"❌ Ошибка поиска: {data['error']}")
             else:
                 st.warning("🔍 Введите поисковый запрос или выберите тип организма")
     
     # Подсказка внизу боковой панели
     st.sidebar.markdown("---")
     st.sidebar.caption("💡 **Совет:** Результаты поиска отображаются в основном контенте")
+    st.sidebar.caption("💾 **База данных:** " + DATABASE_PATH)
 
 # Основной контент
 # Проверяем, есть ли сохраненные результаты поиска метаболитов
@@ -702,44 +896,32 @@ if st.session_state.get("search_submitted", False) and st.session_state.get("met
             if st.button("⬅️ Предыдущая", disabled=st.session_state.met_page <= 1, key="met_prev"):
                 st.session_state.met_page = max(1, st.session_state.met_page - 1)
                 # Обновляем результаты для новой страницы
-                try:
-                    params = {"page": st.session_state.met_page, "page_size": st.session_state.met_page_size}
-                    if st.session_state.get("last_search_query"):
-                        params["q"] = st.session_state.last_search_query
-                    if st.session_state.get("last_mass_query"):
-                        params["mass"] = st.session_state.last_mass_query
-                    if st.session_state.get("last_tolerance_ppm"):
-                        params["tol_ppm"] = st.session_state.last_tolerance_ppm
-                    
-                    response = requests.get(f"{API_BASE_URL}/metabolites/search", params=params)
-                    if response.status_code == 200:
-                        data = response.json()
-                        st.session_state.met_search_results = data.get("metabolites", [])
-                        st.rerun()
-                except Exception:
-                    pass
+                data = _search_metabolites(
+                    st.session_state.get("last_search_query"),
+                    st.session_state.get("last_mass_query"),
+                    st.session_state.get("last_tolerance_ppm", 10),
+                    st.session_state.met_page,
+                    st.session_state.met_page_size
+                )
+                if "error" not in data:
+                    st.session_state.met_search_results = data.get("metabolites", [])
+                    st.rerun()
         with pc2:
             st.markdown(f"Страница {st.session_state.met_page} из {total_pages}")
         with pc3:
             if st.button("Следующая ➡️", disabled=st.session_state.met_page >= total_pages, key="met_next"):
                 st.session_state.met_page = min(total_pages, st.session_state.met_page + 1)
                 # Обновляем результаты для новой страницы
-                try:
-                    params = {"page": st.session_state.met_page, "page_size": st.session_state.met_page_size}
-                    if st.session_state.get("last_search_query"):
-                        params["q"] = st.session_state.last_search_query
-                    if st.session_state.get("last_mass_query"):
-                        params["mass"] = st.session_state.last_mass_query
-                    if st.session_state.get("last_tolerance_ppm"):
-                        params["tol_ppm"] = st.session_state.last_tolerance_ppm
-                    
-                    response = requests.get(f"{API_BASE_URL}/metabolites/search", params=params)
-                    if response.status_code == 200:
-                        data = response.json()
-                        st.session_state.met_search_results = data.get("metabolites", [])
-                        st.rerun()
-                except Exception:
-                    pass
+                data = _search_metabolites(
+                    st.session_state.get("last_search_query"),
+                    st.session_state.get("last_mass_query"),
+                    st.session_state.get("last_tolerance_ppm", 10),
+                    st.session_state.met_page,
+                    st.session_state.met_page_size
+                )
+                if "error" not in data:
+                    st.session_state.met_search_results = data.get("metabolites", [])
+                    st.rerun()
 
 # Пагинация для ферментов
 if st.session_state.get("enz_search_submitted", False) and st.session_state.get("enz_total_results", 0):
@@ -754,20 +936,15 @@ if st.session_state.get("enz_search_submitted", False) and st.session_state.get(
             if st.button("⬅️ Предыдущая", key="enz_prev", disabled=st.session_state.enz_page <= 1):
                 st.session_state.enz_page = max(1, st.session_state.enz_page - 1)
                 # Обновляем результаты для новой страницы
-                try:
-                    params = {"page": st.session_state.enz_page, "page_size": st.session_state.enz_page_size}
-                    if st.session_state.get("enz_last_query"):
-                        params["q"] = st.session_state.enz_last_query
-                    if st.session_state.get("enz_last_organism_type") != "Все":
-                        params["organism_type"] = st.session_state.enz_last_organism_type
-                    
-                    response = requests.get(f"{API_BASE_URL}/enzymes/search", params=params)
-                    if response.status_code == 200:
-                        data = response.json()
-                        st.session_state.enz_search_results = data.get("enzymes", [])
-                        st.rerun()
-                except Exception:
-                    pass
+                data = _search_enzymes(
+                    st.session_state.get("enz_last_query"),
+                    st.session_state.get("enz_last_organism_type"),
+                    st.session_state.enz_page,
+                    st.session_state.enz_page_size
+                )
+                if "error" not in data:
+                    st.session_state.enz_search_results = data.get("enzymes", [])
+                    st.rerun()
                     
         with pc2:
             st.markdown(f"Страница {st.session_state.enz_page} из {total_pages}")
@@ -776,20 +953,15 @@ if st.session_state.get("enz_search_submitted", False) and st.session_state.get(
             if st.button("Следующая ➡️", key="enz_next", disabled=st.session_state.enz_page >= total_pages):
                 st.session_state.enz_page = min(total_pages, st.session_state.enz_page + 1)
                 # Обновляем результаты для новой страницы
-                try:
-                    params = {"page": st.session_state.enz_page, "page_size": st.session_state.enz_page_size}
-                    if st.session_state.get("enz_last_query"):
-                        params["q"] = st.session_state.enz_last_query
-                    if st.session_state.get("enz_last_organism_type") != "Все":
-                        params["organism_type"] = st.session_state.enz_last_organism_type
-                    
-                    response = requests.get(f"{API_BASE_URL}/enzymes/search", params=params)
-                    if response.status_code == 200:
-                        data = response.json()
-                        st.session_state.enz_search_results = data.get("enzymes", [])
-                        st.rerun()
-                except Exception:
-                    pass
+                data = _search_enzymes(
+                    st.session_state.get("enz_last_query"),
+                    st.session_state.get("enz_last_organism_type"),
+                    st.session_state.enz_page,
+                    st.session_state.enz_page_size
+                )
+                if "error" not in data:
+                    st.session_state.enz_search_results = data.get("enzymes", [])
+                    st.rerun()
 
 # Вкладки для разных функций
 tab1, tab2, tab3, tab4 = st.tabs(["🔍 Поиск метаболитов", "🧪 Поиск ферментов", "📁 Аннотация CSV", "📚 Справка"])
@@ -799,11 +971,13 @@ with tab1:
     st.markdown("""
     **Используйте боковую панель для поиска метаболитов!**
     
-    Поиск доступен по:
+    Поиск выполняется напрямую в локальной базе данных по:
     - **Названию** (например: глюкоза, пируват)
     - **Химической формуле** (например: C6H12O6)
     - **Массе (m/z)** с указанием допуска в ppm
-    """)
+    
+    **База данных:** `{DATABASE_PATH}`
+    """.format(DATABASE_PATH=DATABASE_PATH))
     
     # Примеры поиска
     st.subheader("💡 Примеры поиска")
@@ -826,12 +1000,14 @@ with tab2:
     st.markdown("""
     **Используйте боковую панель для поиска ферментов!** 
     
-    Поиск доступен по:
+    Поиск выполняется напрямую в локальной базе данных по:
     - **Названию** (например: Ribulose, dehydrogenase)
     - **EC номеру** (например: 4.1.1.39, 1.1.1)
     - **Организму** (например: Arabidopsis, Cucumis)
     - **Типу организма** (plant, animal, bacteria, fungi)
-    """)
+    
+    **База данных:** `{DATABASE_PATH}`
+    """.format(DATABASE_PATH=DATABASE_PATH))
     
     # Примеры поиска ферментов
     st.subheader("💡 Примеры поиска ферментов")
@@ -861,7 +1037,8 @@ with tab2:
 
 with tab3:
     st.header("📁 Аннотация CSV файлов")
-    st.markdown("Загрузите CSV файл с пиками LC-MS для автоматической аннотации метаболитами")
+    st.markdown("Загрузите CSV файл с пиками LC-MS для автоматической аннотации метаболитами из локальной базы данных")
+    st.markdown(f"**База данных:** `{DATABASE_PATH}`")
     
     # Загрузка файла
     uploaded_file = st.file_uploader(
@@ -911,79 +1088,65 @@ with tab3:
                 # Кнопка аннотации
                 if st.button("🔬 Начать аннотацию", type="primary"):
                     with st.spinner("Выполняется аннотация..."):
-                        try:
-                            # Подготавливаем данные для API
-                            mz_values = df[mass_column].astype(float).tolist()
+                        # Выполняем аннотацию
+                        annotation_data = _annotate_csv_data(
+                            uploaded_file.getvalue(),
+                            mass_column,
+                            annotation_tolerance
+                        )
+                        
+                        if "error" not in annotation_data:
+                            st.success("✅ Аннотация завершена!")
                             
-                            # Вызываем API для аннотации
-                            response = requests.post(
-                                f"{API_BASE_URL}/annotate/csv",
-                                files={"file": uploaded_file.getvalue()},
-                                data={
-                                    "mz_column": mass_column,
-                                    "tol_ppm": annotation_tolerance
-                                }
+                            # Показываем результаты
+                            st.subheader("📋 Результаты аннотации")
+                            
+                            results_data = []
+                            for item in annotation_data.get("items", []):
+                                mz = item["mz"]
+                                candidates = item.get("candidates", [])
+                                best_match = item.get("best_match")
+                                
+                                results_data.append({
+                                    "m/z": mz,
+                                    "Кандидаты": ", ".join(candidates[:3]) if candidates else "Не найдено",
+                                    "Лучший кандидат": best_match["name"] if best_match else "Не выбран",
+                                    "Формула": best_match["formula"] if best_match else "",
+                                    "Класс": best_match.get("class_name", "") if best_match else ""
+                                })
+                            
+                            results_df = pd.DataFrame(results_data)
+                            st.dataframe(results_df, use_container_width=True)
+                            
+                            # Экспорт результатов
+                            st.subheader("💾 Экспорт результатов")
+                            
+                            # CSV экспорт
+                            csv_buffer = io.StringIO()
+                            results_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
+                            csv_data = csv_buffer.getvalue()
+                            
+                            st.download_button(
+                                label="📥 Скачать CSV",
+                                data=csv_data,
+                                file_name="annotation_results.csv",
+                                mime="text/csv"
+                                )
+                            
+                            # Excel экспорт
+                            excel_buffer = io.BytesIO()
+                            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                                results_df.to_excel(writer, sheet_name='Аннотация', index=False)
+                            excel_data = excel_buffer.getvalue()
+                            
+                            st.download_button(
+                                label="📥 Скачать Excel",
+                                data=excel_data,
+                                file_name="annotation_results.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             )
-                            
-                            if response.status_code == 200:
-                                annotation_data = response.json()
-                                st.success("✅ Аннотация завершена!")
-                                
-                                # Показываем результаты
-                                st.subheader("📋 Результаты аннотации")
-                                
-                                results_data = []
-                                for item in annotation_data.get("items", []):
-                                    mz = item["mz"]
-                                    candidates = item.get("candidates", [])
-                                    best_match = item.get("best_match")
-                                    
-                                    results_data.append({
-                                        "m/z": mz,
-                                        "Кандидаты": ", ".join(candidates[:3]) if candidates else "Не найдено",
-                                        "Лучший кандидат": best_match["name"] if best_match else "Не выбран",
-                                        "Формула": best_match["formula"] if best_match else "",
-                                        "Класс": best_match.get("class_name", "") if best_match else ""
-                                    })
-                                
-                                results_df = pd.DataFrame(results_data)
-                                st.dataframe(results_df, use_container_width=True)
-                                
-                                # Экспорт результатов
-                                st.subheader("💾 Экспорт результатов")
-                                
-                                # CSV экспорт
-                                csv_buffer = io.StringIO()
-                                results_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
-                                csv_data = csv_buffer.getvalue()
-                                
-                                st.download_button(
-                                    label="📥 Скачать CSV",
-                                    data=csv_data,
-                                    file_name="annotation_results.csv",
-                                    mime="text/csv"
-                                )
-                                
-                                # Excel экспорт
-                                excel_buffer = io.BytesIO()
-                                with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                                    results_df.to_excel(writer, sheet_name='Аннотация', index=False)
-                                excel_data = excel_buffer.getvalue()
-                                
-                                st.download_button(
-                                    label="📥 Скачать Excel",
-                                    data=excel_data,
-                                    file_name="annotation_results.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
-                                
-                            else:
-                                st.error(f"❌ Ошибка API: {response.status_code}")
-                                
-                        except requests.exceptions.ConnectionError:
-                            st.error("❌ Не удается подключиться к API серверу")
-                        except Exception as e:
-                            st.error(f"❌ Ошибка аннотации: {str(e)}")
+                        else:
+                            st.error(f"❌ Ошибка аннотации: {annotation_data['error']}")
             else:
                 st.warning("⚠️ CSV файл не содержит столбцов")
                 
@@ -992,6 +1155,7 @@ with tab3:
 
 with tab4:
     st.header("📚 Справка по использованию")
+    st.markdown(f"**База данных:** `{DATABASE_PATH}`")
     
     st.subheader("🎯 Назначение приложения")
     st.markdown("""
@@ -1003,11 +1167,29 @@ with tab4:
     - Создания справочных таблиц для лабораторных работ
     """)
     
+    st.subheader("💾 База данных")
+    st.markdown(f"""
+    **Текущая база данных:** `{DATABASE_PATH}`
+    
+    Приложение автоматически обнаруживает таблицы в базе данных и адаптируется к их структуре.
+    
+    **Поддерживаемые типы таблиц:**
+    - **Метаболиты**: таблицы с названиями, содержащими `metabolite` или `compound`
+    - **Ферменты**: таблицы с названиями, содержащими `enzyme` или `protein`
+    
+    **Автоматическое обнаружение полей:**
+    - Поиск по названию: поля `name`, `formula`, `class`
+    - Поиск по массе: поля `mass`, `weight`, `mz`
+    - Поиск ферментов: поля `name`, `ec`, `family`, `organism`
+    """)
+    
     st.subheader("🔍 Как искать метаболиты")
     st.markdown("""
     1. **По названию**: Введите название метаболита (например: глюкоза, пируват)
     2. **По формуле**: Введите химическую формулу (например: C6H12O6)
     3. **По массе**: Укажите массу (m/z) и допустимое отклонение в ppm
+    
+    **Примечание:** Поиск выполняется напрямую в локальной базе данных SQLite
     """)
     
     st.subheader("🧪 Как искать ферменты")
@@ -1021,6 +1203,8 @@ with tab4:
     - "Ribulose" → найдет RuBisCO и другие ферменты с рибулозой
     - "4.1.1.39" → найдет точно RuBisCO по EC номеру
     - "dehydrogenase" → найдет все дегидрогеназы
+    
+    **Примечание:** Поиск выполняется напрямую в локальной базе данных SQLite
     """)
     
     st.subheader("📁 Как аннотировать CSV файлы")
@@ -1031,6 +1215,8 @@ with tab4:
     4. Установите параметры аннотации (допуск, количество кандидатов)
     5. Запустите аннотацию
     6. Экспортируйте результаты в CSV или Excel
+    
+    **Примечание:** Аннотация выполняется по локальной базе данных метаболитов
     """)
     
     st.subheader("📊 Формат CSV файла")
@@ -1046,11 +1232,13 @@ with tab4:
     
     st.subheader("🔗 Источники данных")
     st.markdown("""
-    Приложение использует данные из открытых баз:
+    Приложение работает с локальной базой данных SQLite, которая может содержать данные из:
     - **HMDB** (Human Metabolome Database)
     - **KEGG** (Kyoto Encyclopedia of Genes and Genomes)
     - **ChEBI** (Chemical Entities of Biological Interest)
     - **PubChem** (Chemical Database)
+    
+    **Важно:** Убедитесь, что база данных содержит необходимые таблицы и данные
     """)
     
     st.subheader("📚 Учебные сценарии")
@@ -1058,9 +1246,15 @@ with tab4:
     - **Лабораторная работа**: "Аннотируйте 20 пиков LC-MS, выделите три ключевых метаболита"
     - **Задание**: "Найдите метаболиты для массы 180.063 ±10 ppm и составьте таблицу ссылок"
     - **Демонстрация**: "Свяжите найденные метаболиты с путями гликолиза и цикла Кребса"
+    
+    **Преимущества локальной версии:**
+    - Работает без интернета
+    - Быстрый доступ к данным
+    - Возможность работы с собственными данными
     """)
 
 # Футер
 st.markdown("---")
-st.markdown("🧬 **Метаболомный справочник** - Учебное приложение для курсов по биохимии и химии")
+st.markdown("🧬 **Метаболомный справочник (Локальная версия)** - Учебное приложение для курсов по биохимии и химии")
+st.markdown("💾 **Работает напрямую с базой данных SQLite**")
 
