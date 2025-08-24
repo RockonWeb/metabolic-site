@@ -190,7 +190,15 @@ def _render_enzyme_card(e: Dict[str, Any]) -> None:
 
 # Конфигурация API
 import os
-API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
+
+# 🔧 НАСТРОЙКА API URL:
+# 1. Создайте файл .env в папке ui/ с содержимым:
+#    API_BASE_URL=https://your-real-app-name.streamlit.app
+# 2. Или установите переменную окружения:
+#    export API_BASE_URL=https://your-real-app-name.streamlit.app
+# 3. Или замените значение по умолчанию ниже на реальный URL
+
+API_BASE_URL = os.getenv("API_BASE_URL", "https://protein-api-app-qsmxhj6iwhkpecgluvjajp.streamlit.app/")
 
 # Настройка страницы
 st.set_page_config(
