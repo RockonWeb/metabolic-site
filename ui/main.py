@@ -32,6 +32,7 @@ def _inject_base_css() -> None:
             font-size: 18px;
             font-weight: 700;
             margin: 0 0 8px 0;
+            color: #000000;
         }
         .card-subtitle { font-size: 14px; color: #475569; margin-bottom: 12px; }
         .pill {
