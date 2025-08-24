@@ -1,5 +1,5 @@
 # FastAPI and related
-pydantic==2.5.0
+pydantic>=2.8,<3
 pydantic-settings==2.1.0
 
 # Database
