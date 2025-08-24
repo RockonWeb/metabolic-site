@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: metabolome
+      POSTGRES_USER: metabolome
+      POSTGRES_PASSWORD: metabolome_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U metabolome"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    environment:
+      DATABASE_URL: postgresql+psycopg2://metabolome:metabolome_password@db:5432/metabolome
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      DEBUG: "true"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        sleep 10 &&
+        echo 'Running database migrations...' &&
+        alembic upgrade head &&
+        echo 'Importing sample data...' &&
+        python data/import_data.py &&
+        echo 'Starting API server...' &&
+        uvicorn api.app.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  ui:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ui
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+    environment:
+      API_BASE_URL: http://api:8000
+
+volumes:
+  postgres_data:

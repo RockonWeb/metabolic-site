@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  # SQLite version for development
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    environment:
+      DATABASE_URL: sqlite:///./data/metabolome.db
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      DEBUG: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./api:/app/api
+      - ./alembic:/app/alembic
+    command: >
+      sh -c "
+        echo 'Creating database...' &&
+        python data/import_data.py &&
+        echo 'Starting API server...' &&
+        uvicorn api.app.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  ui:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ui
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+    volumes:
+      - ./ui:/app/ui
+    environment:
+      API_BASE_URL: http://localhost:8000
