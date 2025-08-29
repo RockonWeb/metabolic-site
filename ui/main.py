@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import io
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import math
 import plotly.express as px
 import plotly.graph_objects as go
@@ -17,6 +17,18 @@ logger = logging.getLogger(__name__)
 # Вспомогательные стили/утилиты UI
 # -------------------------
 
+def truncate_description(text: str, max_words: int = 6) -> str:
+    """Обрезает описание до указанного количества слов"""
+    if not text or text == 'None':
+        return text
+    
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    
+    truncated = ' '.join(words[:max_words])
+    return truncated + '...'
+
 def _inject_base_css() -> None:
     """Добавляет базовые CSS-стили для карточек, шапки-метрик и таблиц."""
     st.markdown(
@@ -30,14 +42,34 @@ def _inject_base_css() -> None:
             box-shadow: 0 6px 18px rgba(0,0,0,0.3);
             padding: 18px 18px 16px 18px;
             margin-bottom: 12px;
+            min-height: 120px;
+            display: flex;
+            flex-direction: column;
         }
         .card-title {
             font-size: 18px;
             font-weight: 700;
             margin: 0 0 8px 0;
             color: #FAFAFA;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            hyphens: auto;
+            line-height: 1.3;
+            max-height: 4.5em;
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
         }
-        .card-subtitle { font-size: 14px; color: #B0B0B0; margin-bottom: 12px; }
+        .card-subtitle { 
+            font-size: 14px; 
+            color: #B0B0B0; 
+            margin-bottom: 12px; 
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            line-height: 1.4;
+            white-space: pre-line;
+        }
         .pill {
             display: inline-block;
             padding: 4px 10px;
@@ -115,6 +147,24 @@ def _inject_base_css() -> None:
             text-decoration: underline !important;
         }
         
+        /* Стили для химических формул */
+        .formula {
+            font-family: 'Times New Roman', serif;
+            font-style: normal;
+        }
+        
+        .formula .subscript {
+            font-size: 0.7em;
+            vertical-align: sub;
+            font-weight: normal;
+        }
+        
+        .formula .superscript {
+            font-size: 0.7em;
+            vertical-align: super;
+            font-weight: normal;
+        }
+        
 
         </style>
         
@@ -127,24 +177,51 @@ def _inject_base_css() -> None:
 METABOLITES_DB_PATH = os.getenv("METABOLITES_DB_PATH", "data/metabolites.db")
 ENZYMES_DB_PATH = os.getenv("ENZYMES_DB_PATH", "data/enzymes.db")
 PROTEINS_DB_PATH = os.getenv("PROTEINS_DB_PATH", "data/proteins.db")
+CARBOHYDRATES_DB_PATH = os.getenv("CARBOHYDRATES_DB_PATH", "data/carbohydrates.db")
+LIPIDS_DB_PATH = os.getenv("LIPIDS_DB_PATH", "data/lipids.db")
+
+def format_chemical_formula(formula: str) -> str:
+    """Преобразует химическую формулу в HTML с правильными индексами"""
+    if not formula or formula == "—" or formula == "None":
+        return formula
+    
+    # Заменяем цифры на подстрочные индексы
+    import re
+    
+    # Обрабатываем заряды (например, Ca2+, Fe3+)
+    formula = re.sub(r'(\d+)\+', r'<span class="superscript">\1+</span>', formula)
+    
+    # Обрабатываем обычные индексы (например, H2O, CO2)
+    formula = re.sub(r'(\d+)', r'<span class="subscript">\1</span>', formula)
+    
+    # Обрабатываем отрицательные заряды (например, SO4^2-)
+    formula = re.sub(r'\^(\d+)-', r'<span class="superscript">\1-</span>', formula)
+    
+    return f'<span class="formula">{formula}</span>'
 
 # Отладочная информация
-logger.info(f"Текущая рабочая директория: {os.getcwd()}")
-logger.info(f"Путь к базе метаболитов: {os.path.abspath(METABOLITES_DB_PATH)}")
-logger.info(f"Путь к базе ферментов: {os.path.abspath(ENZYMES_DB_PATH)}")
-logger.info(f"Путь к базе белков: {os.path.abspath(PROTEINS_DB_PATH)}")
+#logger.info(f"Текущая рабочая директория: {os.getcwd()}")
+#logger.info(f"Путь к базе метаболитов: {os.path.abspath(METABOLITES_DB_PATH)}")
+#logger.info(f"Путь к базе ферментов: {os.path.abspath(ENZYMES_DB_PATH)}")
+#logger.info(f"Путь к базе белков: {os.path.abspath(PROTEINS_DB_PATH)}")
 
 def _get_metabolites_connection():
     """Создает подключение к базе данных метаболитов"""
     try:
-        logger.info(f"Проверяем существование файла: {METABOLITES_DB_PATH}")
+        #logger.info(f"Проверяем существование файла: {METABOLITES_DB_PATH}")
         if not os.path.exists(METABOLITES_DB_PATH):
             logger.error(f"Файл не найден: {METABOLITES_DB_PATH}")
             return None
-        logger.info(f"Подключаемся к базе метаболитов: {METABOLITES_DB_PATH}")
+        #logger.info(f"Подключаемся к базе метаболитов: {METABOLITES_DB_PATH}")
         conn = sqlite3.connect(METABOLITES_DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        logger.info("Подключение к базе метаболитов успешно")
+        # Проверяем, что таблица существует
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='metabolites'")
+        if cursor.fetchone() is None:
+            logger.error("Таблица 'metabolites' не найдена в базе данных")
+            conn.close()
+            return None
+        #logger.info("Подключение к базе метаболитов успешно")
         return conn
     except Exception as e:
         logger.error(f"Ошибка подключения к базе метаболитов: {e}")
@@ -153,14 +230,20 @@ def _get_metabolites_connection():
 def _get_enzymes_connection():
     """Создает подключение к базе данных ферментов"""
     try:
-        logger.info(f"Проверяем существование файла: {ENZYMES_DB_PATH}")
+        #logger.info(f"Проверяем существование файла: {ENZYMES_DB_PATH}")
         if not os.path.exists(ENZYMES_DB_PATH):
             logger.error(f"Файл не найден: {ENZYMES_DB_PATH}")
             return None
-        logger.info(f"Подключаемся к базе ферментов: {ENZYMES_DB_PATH}")
+        #logger.info(f"Подключаемся к базе ферментов: {ENZYMES_DB_PATH}")
         conn = sqlite3.connect(ENZYMES_DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        logger.info("Подключение к базе ферментов успешно")
+        # Проверяем, что таблица существует
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='enzymes'")
+        if cursor.fetchone() is None:
+            logger.error("Таблица 'enzymes' не найдена в базе данных")
+            conn.close()
+            return None
+        #logger.info("Подключение к базе ферментов успешно")
         return conn
     except Exception as e:
         logger.error(f"Ошибка подключения к базе ферментов: {e}")
@@ -169,32 +252,76 @@ def _get_enzymes_connection():
 def _get_proteins_connection():
     """Создает подключение к базе данных белков"""
     try:
-        logger.info(f"Проверяем существование файла: {PROTEINS_DB_PATH}")
+        #logger.info(f"Проверяем существование файла: {PROTEINS_DB_PATH}")
         if not os.path.exists(PROTEINS_DB_PATH):
             logger.error(f"Файл не найден: {PROTEINS_DB_PATH}")
             return None
-        logger.info(f"Подключаемся к базе белков: {PROTEINS_DB_PATH}")
+        #logger.info(f"Подключаемся к базе белков: {PROTEINS_DB_PATH}")
         conn = sqlite3.connect(PROTEINS_DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        logger.info("Подключение к базе белков успешно")
+        # Проверяем, что таблица существует
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='proteins'")
+        if cursor.fetchone() is None:
+            logger.error("Таблица 'proteins' не найдена в базе данных")
+            conn.close()
+            return None
+        #logger.info("Подключение к базе белков успешно")
         return conn
     except Exception as e:
         logger.error(f"Ошибка подключения к базе белков: {e}")
         return None
 
+def _get_carbohydrates_connection():
+    """Создает подключение к базе данных углеводов"""
+    try:
+        if not os.path.exists(CARBOHYDRATES_DB_PATH):
+            logger.error(f"Файл не найден: {CARBOHYDRATES_DB_PATH}")
+            return None
+        conn = sqlite3.connect(CARBOHYDRATES_DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        # Проверяем, что таблица существует
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='carbohydrates'")
+        if cursor.fetchone() is None:
+            logger.error("Таблица 'carbohydrates' не найдена в базе данных")
+            conn.close()
+            return None
+        return conn
+    except Exception as e:
+        logger.error(f"Ошибка подключения к базе углеводов: {e}")
+        return None
+
+def _get_lipids_connection():
+    """Создает подключение к базе данных липидов"""
+    try:
+        if not os.path.exists(LIPIDS_DB_PATH):
+            logger.error(f"Файл не найден: {LIPIDS_DB_PATH}")
+            return None
+        conn = sqlite3.connect(LIPIDS_DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        # Проверяем, что таблица существует
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='lipids'")
+        if cursor.fetchone() is None:
+            logger.error("Таблица 'lipids' не найдена в базе данных")
+            conn.close()
+            return None
+        return conn
+    except Exception as e:
+        logger.error(f"Ошибка подключения к базе липидов: {e}")
+        return None
+
 def _get_totals() -> Dict[str, Any]:
     """Возвращает агрегированные счетчики для шапки"""
-    totals = {"metabolites": 0, "enzymes": 0, "proteins": 0, "db_status": "unknown"}
+    totals = {"metabolites": 0, "enzymes": 0, "proteins": 0, "carbohydrates": 0, "lipids": 0, "db_status": "unknown"}
     
     # Подсчет метаболитов
-    logger.info("Получаем подключение к базе метаболитов для подсчета")
+    #logger.info("Получаем подключение к базе метаболитов для подсчета")
     conn_met = None
     try:
         conn_met = _get_metabolites_connection()
         if conn_met:
             cursor = conn_met.execute("SELECT COUNT(*) FROM metabolites")
             totals["metabolites"] = cursor.fetchone()[0]
-            logger.info(f"Найдено метаболитов: {totals['metabolites']}")
+            #logger.info(f"Найдено метаболитов: {totals['metabolites']}")
         else:
             logger.error("Не удалось получить подключение к базе метаболитов")
     except Exception as e:
@@ -204,14 +331,14 @@ def _get_totals() -> Dict[str, Any]:
             conn_met.close()
     
     # Подсчет ферментов
-    logger.info("Получаем подключение к базе ферментов для подсчета")
+    #logger.info("Получаем подключение к базе ферментов для подсчета")
     conn_enz = None
     try:
         conn_enz = _get_enzymes_connection()
         if conn_enz:
             cursor = conn_enz.execute("SELECT COUNT(*) FROM enzymes")
             totals["enzymes"] = cursor.fetchone()[0]
-            logger.info(f"Найдено ферментов: {totals['enzymes']}")
+            #logger.info(f"Найдено ферментов: {totals['enzymes']}")
         else:
             logger.error("Не удалось получить подключение к базе ферментов")
     except Exception as e:
@@ -221,14 +348,14 @@ def _get_totals() -> Dict[str, Any]:
             conn_enz.close()
     
     # Подсчет белков
-    logger.info("Получаем подключение к базе белков для подсчета")
+    #logger.info("Получаем подключение к базе белков для подсчета")
     conn_prot = None
     try:
         conn_prot = _get_proteins_connection()
         if conn_prot:
             cursor = conn_prot.execute("SELECT COUNT(*) FROM proteins")
             totals["proteins"] = cursor.fetchone()[0]
-            logger.info(f"Найдено белков: {totals['proteins']}")
+            #logger.info(f"Найдено белков: {totals['proteins']}")
         else:
             logger.error("Не удалось получить подключение к базе белков")
     except Exception as e:
@@ -237,10 +364,40 @@ def _get_totals() -> Dict[str, Any]:
         if conn_prot:
             conn_prot.close()
     
+    # Подсчет углеводов
+    conn_carb = None
+    try:
+        conn_carb = _get_carbohydrates_connection()
+        if conn_carb:
+            cursor = conn_carb.execute("SELECT COUNT(*) FROM carbohydrates")
+            totals["carbohydrates"] = cursor.fetchone()[0]
+        else:
+            logger.error("Не удалось получить подключение к базе углеводов")
+    except Exception as e:
+        logger.error(f"Ошибка при подсчете углеводов: {e}")
+    finally:
+        if conn_carb:
+            conn_carb.close()
+    
+    # Подсчет липидов
+    conn_lip = None
+    try:
+        conn_lip = _get_lipids_connection()
+        if conn_lip:
+            cursor = conn_lip.execute("SELECT COUNT(*) FROM lipids")
+            totals["lipids"] = cursor.fetchone()[0]
+        else:
+            logger.error("Не удалось получить подключение к базе липидов")
+    except Exception as e:
+        logger.error(f"Ошибка при подсчете липидов: {e}")
+    finally:
+        if conn_lip:
+            conn_lip.close()
+    
     # Определяем статус
-    if totals["metabolites"] > 0 or totals["enzymes"] > 0 or totals["proteins"] > 0:
+    if totals["metabolites"] > 0 or totals["enzymes"] > 0 or totals["proteins"] > 0 or totals["carbohydrates"] > 0 or totals["lipids"] > 0:
         totals["db_status"] = "healthy"
-        logger.info("Статус БД: healthy")
+        #logger.info("Статус БД: healthy")
     else:
         totals["db_status"] = "offline"
         logger.error("Статус БД: offline - нет данных в базах")
@@ -249,7 +406,8 @@ def _get_totals() -> Dict[str, Any]:
 
 def _render_metabolite_card(m: Dict[str, Any]) -> None:
     """Карточка метаболита с ссылками и кнопкой деталей"""
-    name = m.get("name") or "Без названия"
+    # Приоритет русскому названию, если оно есть
+    name = m.get("name_ru") or m.get("name") or "Без названия"
     formula = m.get("formula") or "—"
     mass = m.get("exact_mass")
     mass_fmt = f"{mass:.6f} Da" if isinstance(mass, (int, float)) else "—"
@@ -283,12 +441,15 @@ def _render_metabolite_card(m: Dict[str, Any]) -> None:
     # Создаем уникальный ключ для карточки
     card_key = f"met_card_{m.get('id', hash(name))}"
 
+    # Форматируем формулу с правильными индексами
+    formatted_formula = format_chemical_formula(formula)
+    
     # Создаем карточку с кнопкой
     st.markdown(
         f"""
         <div class="card clickable-card" style="cursor: pointer;">
           <div class="card-title">{name}</div>
-          <div class="card-subtitle">Формула: <b>{formula}</b> &nbsp;|&nbsp; Масса: <b>{mass_fmt}</b></div>
+          <div class="card-subtitle">Формула: <b>{formatted_formula}</b><br>Масса: <b>{mass_fmt}</b></div>
           <div>{pills_html}</div>
           <div class="row-divider"></div>
           <div>{links_html}</div>
@@ -306,7 +467,8 @@ def _render_metabolite_card(m: Dict[str, Any]) -> None:
 
 def _render_enzyme_card(e: Dict[str, Any]) -> None:
     """Карточка фермента с ссылками и кнопкой деталей"""
-    name = e.get("name") or e.get("name_ru") or "Без названия"
+    # Приоритет русскому названию, если оно есть
+    name = e.get("name_ru") or e.get("name") or "Без названия"
     ec = e.get("ec_number") or "—"
     org = e.get("organism") or "—"
     fam = e.get("family") or "—"
@@ -338,7 +500,7 @@ def _render_enzyme_card(e: Dict[str, Any]) -> None:
         props.append(f"Организм: <b>{org}</b>")
     if fam != "—":
         props.append(f"Семейство: <b>{fam}</b>")
-    subtitle = " &nbsp;|&nbsp; ".join(props)
+    subtitle = "<br>".join(props)
     
     # Создаем уникальный ключ для карточки
     card_key = f"enz_card_{e.get('id', hash(name))}"
@@ -365,7 +527,8 @@ def _render_enzyme_card(e: Dict[str, Any]) -> None:
 
 def _render_protein_card(p: Dict[str, Any]) -> None:
     """Карточка белка с ссылками и кнопкой деталей"""
-    name = p.get("name") or p.get("name_ru") or "Без названия"
+    # Приоритет русскому названию, если оно есть
+    name = p.get("name_ru") or p.get("name") or "Без названия"
     func = p.get("function") or "—"
     org = p.get("organism") or "—"
     fam = p.get("family") or "—"
@@ -392,12 +555,13 @@ def _render_protein_card(p: Dict[str, Any]) -> None:
     
     props = []
     if func != "—":
-        props.append(f"Функция: <b>{func}</b>")
+        truncated_func = truncate_description(func)
+        props.append(f"Функция: <b>{truncated_func}</b>")
     if org != "—":
         props.append(f"Организм: <b>{org}</b>")
     if fam != "—":
         props.append(f"Семейство: <b>{fam}</b>")
-    subtitle = " &nbsp;|&nbsp; ".join(props)
+    subtitle = "<br>".join(props)
     
     # Создаем уникальный ключ для карточки
     card_key = f"prot_card_{p.get('id', hash(name))}"
@@ -424,8 +588,10 @@ def _render_protein_card(p: Dict[str, Any]) -> None:
 
 def _show_metabolite_details(metabolite: Dict[str, Any]) -> None:
     """Показывает детальную информацию о метаболите"""
-    st.markdown("---")
-    st.subheader(f"🧬 {metabolite.get('name', 'Метаболит')}")
+    #st.markdown("---")
+    # В заголовке используем русское название, если оно есть
+    display_name = metabolite.get('name_ru') or metabolite.get('name') or 'Метаболит'
+    st.subheader(f"🧬 {display_name}")
     
     # Основная информация в карточках
     col1, col2 = st.columns(2)
@@ -433,22 +599,26 @@ def _show_metabolite_details(metabolite: Dict[str, Any]) -> None:
     with col1:
         st.markdown("### 📋 Основная информация")
         with st.container():
+            # Форматируем формулу для деталей
+            detail_formula = format_chemical_formula(metabolite.get('formula') or 'Не указано')
             st.markdown(f"""
-            **Название:** {metabolite.get('name') or 'Не указано'}  
+            **Название (EN):** {metabolite.get('name') or 'Не указано'}  
             **Название (RU):** {metabolite.get('name_ru') or 'Не указано'}  
-            **Формула:** `{metabolite.get('formula') or 'Не указано'}`  
+            **Формула:** {detail_formula}  
             **Класс:** {metabolite.get('class_name') or 'Не указано'}
-            """)
+            """, unsafe_allow_html=True)
     
     with col2:
         st.markdown("### ⚖️ Физико-химические свойства")
         with st.container():
             mass = metabolite.get('exact_mass')
             mass_str = f"{mass:.6f} Da" if isinstance(mass, (int, float)) else 'Не указано'
+            # Форматируем формулу для второй части деталей
+            detail_formula2 = format_chemical_formula(metabolite.get('formula') or 'Не указано')
             st.markdown(f"""
             **Масса:** {mass_str}  
-            **Молекулярная формула:** `{metabolite.get('formula') or 'Не указано'}`
-            """)
+            **Молекулярная формула:** {detail_formula2}
+            """, unsafe_allow_html=True)
     
     # Внешние идентификаторы
     st.markdown("### 🔗 Внешние идентификаторы")
@@ -492,8 +662,10 @@ def _show_metabolite_details(metabolite: Dict[str, Any]) -> None:
 
 def _show_enzyme_details(enzyme: Dict[str, Any]) -> None:
     """Показывает детальную информацию о ферменте"""
-    st.markdown("---")
-    st.subheader(f"🧪 {enzyme.get('name', 'Фермент')}")
+    #st.markdown("---")
+    # В заголовке используем русское название, если оно есть
+    display_name = enzyme.get('name_ru') or enzyme.get('name') or 'Фермент'
+    st.subheader(f"🧪 {display_name}")
     
     # Основная информация
     col1, col2 = st.columns(2)
@@ -502,7 +674,7 @@ def _show_enzyme_details(enzyme: Dict[str, Any]) -> None:
         st.markdown("### 📋 Основная информация")
         with st.container():
             st.markdown(f"""
-            **Название:** {enzyme.get('name') or 'Не указано'}  
+            **Название (EN):** {enzyme.get('name') or 'Не указано'}  
             **Название (RU):** {enzyme.get('name_ru') or 'Не указано'}  
             **EC номер:** `{enzyme.get('ec_number') or 'Не указано'}`  
             **Семейство:** {enzyme.get('family') or 'Не указано'}  
@@ -584,8 +756,10 @@ def _show_enzyme_details(enzyme: Dict[str, Any]) -> None:
 
 def _show_protein_details(protein: Dict[str, Any]) -> None:
     """Показывает детальную информацию о белке"""
-    st.markdown("---")
-    st.subheader(f"🔬 {protein.get('name', 'Белок')}")
+    #st.markdown("---")
+    # В заголовке используем русское название, если оно есть
+    display_name = protein.get('name_ru') or protein.get('name') or 'Белок'
+    st.subheader(f"🔬 {display_name}")
     
     # Основная информация
     col1, col2 = st.columns(2)
@@ -594,7 +768,7 @@ def _show_protein_details(protein: Dict[str, Any]) -> None:
         st.markdown("### 📋 Основная информация")
         with st.container():
             st.markdown(f"""
-            **Название:** {protein.get('name') or 'Не указано'}  
+            **Название (EN):** {protein.get('name') or 'Не указано'}  
             **Название (RU):** {protein.get('name_ru') or 'Не указано'}  
             **Функция:** {protein.get('function') or 'Не указано'}  
             **Семейство:** {protein.get('family') or 'Не указано'}  
@@ -618,21 +792,21 @@ def _show_protein_details(protein: Dict[str, Any]) -> None:
     with bio_col1:
         mol_weight = protein.get('molecular_weight')
         if mol_weight and mol_weight != 'None':
-            st.metric("Молекулярная масса", f"{mol_weight:.1f} kDa")
+            st.metric("Молекулярная масса", f"{(mol_weight / 1000):.1f} kDa")
         else:
             st.metric("Молекулярная масса", "Не указано")
     
     with bio_col2:
         iso_point = protein.get('isoelectric_point')
         if iso_point and iso_point != 'None':
-            st.metric("Изоэлектрическая точка", str(iso_point))
+            st.metric("Точка pH", str(iso_point))
         else:
-            st.metric("Изоэлектрическая точка", "Не указано")
+            st.metric("Точка pH", "Не указано")
     
     with bio_col3:
         length = protein.get('length')
         if length and length != 'None':
-            st.metric("Длина", f"{length} аминокислот")
+            st.metric("Длина", f"{length} а/к")
         else:
             st.metric("Длина", "Не указано")
     
@@ -679,7 +853,7 @@ def _show_protein_details(protein: Dict[str, Any]) -> None:
     
     st.markdown("---")
 
-def _search_metabolites(query: str = None, mass: float = None, tol_ppm: int = 10, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+def _search_metabolites(query: Optional[str] = None, mass: Optional[float] = None, tol_ppm: int = 10, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
     """Поиск метаболитов"""
     conn = None
     try:
@@ -690,19 +864,26 @@ def _search_metabolites(query: str = None, mass: float = None, tol_ppm: int = 10
         base_query = "SELECT * FROM metabolites WHERE 1=1"
         params = []
         
-        if query:
-            base_query += " AND (LOWER(name) LIKE LOWER(?) OR LOWER(name_ru) LIKE LOWER(?) OR LOWER(formula) LIKE LOWER(?) OR LOWER(class_name) LIKE LOWER(?))"
-            params.extend([f"%{query}%" for _ in range(4)])
+        if query and query.strip():
+            # Приводим запрос к формату с заглавной буквы
+            formatted_query = query.strip().capitalize()
+            base_query += " AND (name LIKE ? OR name_ru LIKE ? OR formula LIKE ? OR class_name LIKE ?)"
+            params.extend([f"%{formatted_query}%" for _ in range(4)])
         
-        if mass:
+        if mass and mass > 0:
             tolerance = mass * tol_ppm / 1000000
             base_query += " AND exact_mass BETWEEN ? AND ?"
             params.extend([mass - tolerance, mass + tolerance])
+            logger.info(f"Mass search: {mass} ± {tolerance} (tolerance: {tol_ppm} ppm)")
+            logger.info(f"SQL: {base_query}")
+            logger.info(f"Params: {params}")
         
+        # Подсчет общего количества
         count_query = f"SELECT COUNT(*) FROM ({base_query})"
         cursor = conn.execute(count_query, params)
         total = cursor.fetchone()[0]
         
+        # Добавляем пагинацию
         base_query += " LIMIT ? OFFSET ?"
         params.extend([page_size, (page - 1) * page_size])
         
@@ -717,12 +898,13 @@ def _search_metabolites(query: str = None, mass: float = None, tol_ppm: int = 10
         }
         
     except Exception as e:
+        logger.error(f"Metabolite search error: {str(e)}")
         return {"error": f"Metabolite search failed: {str(e)}"}
     finally:
         if conn:
             conn.close()
 
-def _search_enzymes(query: str = None, organism_type: str = None, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+def _search_enzymes(query: Optional[str] = None, mass: Optional[float] = None, tol_ppm: int = 10, organism_type: Optional[str] = None, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
     """Поиск ферментов"""
     conn = None
     try:
@@ -733,18 +915,30 @@ def _search_enzymes(query: str = None, organism_type: str = None, page: int = 1,
         base_query = "SELECT * FROM enzymes WHERE 1=1"
         params = []
         
-        if query:
-            base_query += " AND (LOWER(name) LIKE LOWER(?) OR LOWER(name_ru) LIKE LOWER(?) OR LOWER(ec_number) LIKE LOWER(?) OR LOWER(family) LIKE LOWER(?))"
-            params.extend([f"%{query}%" for _ in range(4)])
+        if query and query.strip():
+            # Приводим запрос к формату с заглавной буквы
+            formatted_query = query.strip().capitalize()
+            base_query += " AND (name LIKE ? OR name_ru LIKE ? OR ec_number LIKE ? OR family LIKE ?)"
+            params.extend([f"%{formatted_query}%" for _ in range(4)])
+        
+        if mass and mass > 0:
+            # Для ферментов масса в kDa, переводим в Da для поиска
+            mass_da = mass * 1000  # 1 kDa = 1000 Da
+            tolerance = mass_da * tol_ppm / 1000000
+            base_query += " AND molecular_weight BETWEEN ? AND ?"
+            params.extend([(mass_da - tolerance) / 1000, (mass_da + tolerance) / 1000])  # Обратно в kDa
+            logger.info(f"Enzyme mass search: {mass} kDa ± {tolerance/1000:.6f} kDa (tolerance: {tol_ppm} ppm)")
         
         if organism_type and organism_type != "Все":
-            base_query += " AND LOWER(organism_type) LIKE LOWER(?)"
+            base_query += " AND organism_type LIKE ?"
             params.append(f"%{organism_type}%")
         
+        # Подсчет общего количества
         count_query = f"SELECT COUNT(*) FROM ({base_query})"
         cursor = conn.execute(count_query, params)
         total = cursor.fetchone()[0]
         
+        # Добавляем пагинацию
         base_query += " LIMIT ? OFFSET ?"
         params.extend([page_size, (page - 1) * page_size])
         
@@ -759,12 +953,13 @@ def _search_enzymes(query: str = None, organism_type: str = None, page: int = 1,
         }
         
     except Exception as e:
+        logger.error(f"Enzyme search error: {str(e)}")
         return {"error": f"Enzyme search failed: {str(e)}"}
     finally:
         if conn:
             conn.close()
 
-def _search_proteins(query: str = None, organism_type: str = None, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+def _search_proteins(query: Optional[str] = None, mass: Optional[float] = None, tol_ppm: int = 10, organism_type: Optional[str] = None, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
     """Поиск белков"""
     conn = None
     try:
@@ -775,18 +970,30 @@ def _search_proteins(query: str = None, organism_type: str = None, page: int = 1
         base_query = "SELECT * FROM proteins WHERE 1=1"
         params = []
         
-        if query:
-            base_query += " AND (LOWER(name) LIKE LOWER(?) OR LOWER(name_ru) LIKE LOWER(?) OR LOWER(function) LIKE LOWER(?) OR LOWER(family) LIKE LOWER(?))"
-            params.extend([f"%{query}%" for _ in range(4)])
+        if query and query.strip():
+            # Приводим запрос к формату с заглавной буквы
+            formatted_query = query.strip().capitalize()
+            base_query += " AND (name LIKE ? OR name_ru LIKE ? OR function LIKE ? OR family LIKE ?)"
+            params.extend([f"%{formatted_query}%" for _ in range(4)])
+        
+        if mass and mass > 0:
+            # Для белков масса в kDa, переводим в Da для поиска
+            mass_da = mass * 1000  # 1 kDa = 1000 Da
+            tolerance = mass_da * tol_ppm / 1000000
+            base_query += " AND molecular_weight BETWEEN ? AND ?"
+            params.extend([(mass_da - tolerance) / 1000, (mass_da + tolerance) / 1000])  # Обратно в kDa
+            logger.info(f"Protein mass search: {mass} kDa ± {tolerance/1000:.6f} kDa (tolerance: {tol_ppm} ppm)")
         
         if organism_type and organism_type != "Все":
-            base_query += " AND LOWER(organism_type) LIKE LOWER(?)"
+            base_query += " AND organism_type LIKE ?"
             params.append(f"%{organism_type}%")
         
+        # Подсчет общего количества
         count_query = f"SELECT COUNT(*) FROM ({base_query})"
         cursor = conn.execute(count_query, params)
         total = cursor.fetchone()[0]
         
+        # Добавляем пагинацию
         base_query += " LIMIT ? OFFSET ?"
         params.extend([page_size, (page - 1) * page_size])
         
@@ -801,40 +1008,193 @@ def _search_proteins(query: str = None, organism_type: str = None, page: int = 1
         }
         
     except Exception as e:
+        logger.error(f"Protein search error: {str(e)}")
         return {"error": f"Protein search failed: {str(e)}"}
     finally:
         if conn:
             conn.close()
 
-def _unified_search(query: str, mass: float = None, tol_ppm: int = 10, organism_type: str = None, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+def _search_carbohydrates(query: Optional[str] = None, mass: Optional[float] = None, tol_ppm: int = 10, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+    """Поиск углеводов"""
+    conn = None
+    try:
+        conn = _get_carbohydrates_connection()
+        if not conn:
+            return {"error": "Database connection failed"}
+        
+        base_query = "SELECT * FROM carbohydrates WHERE 1=1"
+        params = []
+        
+        if query and query.strip():
+            # Приводим запрос к формату с заглавной буквы
+            formatted_query = query.strip().capitalize()
+            base_query += " AND (name LIKE ? OR name_ru LIKE ? OR formula LIKE ? OR type LIKE ?)"
+            params.extend([f"%{formatted_query}%" for _ in range(4)])
+        
+        if mass and mass > 0:
+            # Поиск по массе с допуском
+            tolerance = mass * (tol_ppm / 1000000)
+            base_query += " AND exact_mass BETWEEN ? AND ?"
+            params.extend([mass - tolerance, mass + tolerance])
+        
+        # Подсчет общего количества
+        count_query = base_query.replace("SELECT *", "SELECT COUNT(*)")
+        cursor = conn.execute(count_query, params)
+        total = cursor.fetchone()[0]
+        
+        # Добавляем пагинацию
+        base_query += " ORDER BY name LIMIT ? OFFSET ?"
+        params.extend([page_size, (page - 1) * page_size])
+        
+        cursor = conn.execute(base_query, params)
+        results = [dict(row) for row in cursor.fetchall()]
+        
+        return {
+            "carbohydrates": results,
+            "total": total,
+            "page": page,
+            "page_size": page_size
+        }
+        
+    except Exception as e:
+        logger.error(f"Carbohydrate search error: {str(e)}")
+        return {"error": f"Carbohydrate search failed: {str(e)}"}
+    finally:
+        if conn:
+            conn.close()
+
+def _search_lipids(query: Optional[str] = None, mass: Optional[float] = None, tol_ppm: int = 10, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+    """Поиск липидов"""
+    conn = None
+    try:
+        conn = _get_lipids_connection()
+        if not conn:
+            return {"error": "Database connection failed"}
+        
+        base_query = "SELECT * FROM lipids WHERE 1=1"
+        params = []
+        
+        if query and query.strip():
+            # Приводим запрос к формату с заглавной буквы
+            formatted_query = query.strip().capitalize()
+            base_query += " AND (name LIKE ? OR name_ru LIKE ? OR formula LIKE ? OR type LIKE ?)"
+            params.extend([f"%{formatted_query}%" for _ in range(4)])
+        
+        if mass and mass > 0:
+            # Поиск по массе с допуском
+            tolerance = mass * (tol_ppm / 1000000)
+            base_query += " AND exact_mass BETWEEN ? AND ?"
+            params.extend([mass - tolerance, mass + tolerance])
+        
+        # Подсчет общего количества
+        count_query = base_query.replace("SELECT *", "SELECT COUNT(*)")
+        cursor = conn.execute(count_query, params)
+        total = cursor.fetchone()[0]
+        
+        # Добавляем пагинацию
+        base_query += " ORDER BY name LIMIT ? OFFSET ?"
+        params.extend([page_size, (page - 1) * page_size])
+        
+        cursor = conn.execute(base_query, params)
+        results = [dict(row) for row in cursor.fetchall()]
+        
+        return {
+            "lipids": results,
+            "total": total,
+            "page": page,
+            "page_size": page_size
+        }
+        
+    except Exception as e:
+        logger.error(f"Lipid search error: {str(e)}")
+        return {"error": f"Lipid search failed: {str(e)}"}
+    finally:
+        if conn:
+            conn.close()
+
+def _unified_search(query: str, mass: Optional[float] = None, tol_ppm: int = 10, organism_type: Optional[str] = None, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
     """Унифицированный поиск по всем базам данных"""
     results = {
         "metabolites": {"data": [], "total": 0},
         "enzymes": {"data": [], "total": 0},
-        "proteins": {"data": [], "total": 0}
+        "proteins": {"data": [], "total": 0},
+        "carbohydrates": {"data": [], "total": 0},
+        "lipids": {"data": [], "total": 0}
     }
     
+    # Проверяем, что есть что искать
+    if not query and not mass:
+        logger.warning("Empty search query and mass")
+        return results
+    
+    # Если есть только масса, очищаем запрос для поиска только по массе
+    if mass and mass > 0 and not query:
+        query = ""
+    
     # Поиск метаболитов
-    if mass:
-        met_result = _search_metabolites(mass=mass, tol_ppm=tol_ppm, page=page, page_size=page_size)
-    else:
-        met_result = _search_metabolites(query=query, page=page, page_size=page_size)
+    try:
+        if mass and mass > 0:
+            logger.info(f"Searching metabolites by mass: {mass} ± {tol_ppm} ppm")
+            met_result = _search_metabolites(mass=mass, tol_ppm=tol_ppm, page=page, page_size=page_size)
+        else:
+            logger.info(f"Searching metabolites by query: {query}")
+            met_result = _search_metabolites(query=query, page=page, page_size=page_size)
+        
+        if "error" not in met_result:
+            results["metabolites"]["data"] = met_result.get("metabolites", [])
+            results["metabolites"]["total"] = met_result.get("total", 0)
+        else:
+            logger.error(f"Metabolite search error: {met_result['error']}")
+    except Exception as e:
+        logger.error(f"Unexpected error in metabolite search: {e}")
     
-    if "error" not in met_result:
-        results["metabolites"]["data"] = met_result.get("metabolites", [])
-        results["metabolites"]["total"] = met_result.get("total", 0)
+    # Поиск ферментов (по тексту и/или массе)
+    if query and query.strip() or mass and mass > 0:
+        try:
+            enz_result = _search_enzymes(query=query, mass=mass, tol_ppm=tol_ppm, organism_type=organism_type, page=page, page_size=page_size)
+            if "error" not in enz_result:
+                results["enzymes"]["data"] = enz_result.get("enzymes", [])
+                results["enzymes"]["total"] = enz_result.get("total", 0)
+            else:
+                logger.error(f"Enzyme search error: {enz_result['error']}")
+        except Exception as e:
+            logger.error(f"Unexpected error in enzyme search: {e}")
     
-    # Поиск ферментов
-    enz_result = _search_enzymes(query=query, organism_type=organism_type, page=page, page_size=page_size)
-    if "error" not in enz_result:
-        results["enzymes"]["data"] = enz_result.get("enzymes", [])
-        results["enzymes"]["total"] = enz_result.get("total", 0)
+    # Поиск белков (по тексту и/или массе)
+    if query and query.strip() or mass and mass > 0:
+        try:
+            prot_result = _search_proteins(query=query, mass=mass, tol_ppm=tol_ppm, organism_type=organism_type, page=page, page_size=page_size)
+            if "error" not in prot_result:
+                results["proteins"]["data"] = prot_result.get("proteins", [])
+                results["proteins"]["total"] = prot_result.get("total", 0)
+            else:
+                logger.error(f"Protein search error: {prot_result['error']}")
+        except Exception as e:
+            logger.error(f"Unexpected error in protein search: {e}")
     
-    # Поиск белков
-    prot_result = _search_proteins(query=query, organism_type=organism_type, page=page, page_size=page_size)
-    if "error" not in prot_result:
-        results["proteins"]["data"] = prot_result.get("proteins", [])
-        results["proteins"]["total"] = prot_result.get("total", 0)
+    # Поиск углеводов (по тексту и/или массе)
+    if query and query.strip() or mass and mass > 0:
+        try:
+            carb_result = _search_carbohydrates(query=query, mass=mass, tol_ppm=tol_ppm, page=page, page_size=page_size)
+            if "error" not in carb_result:
+                results["carbohydrates"]["data"] = carb_result.get("carbohydrates", [])
+                results["carbohydrates"]["total"] = carb_result.get("total", 0)
+            else:
+                logger.error(f"Carbohydrate search error: {carb_result['error']}")
+        except Exception as e:
+            logger.error(f"Unexpected error in carbohydrate search: {e}")
+    
+    # Поиск липидов (по тексту и/или массе)
+    if query and query.strip() or mass and mass > 0:
+        try:
+            lip_result = _search_lipids(query=query, mass=mass, tol_ppm=tol_ppm, page=page, page_size=page_size)
+            if "error" not in lip_result:
+                results["lipids"]["data"] = lip_result.get("lipids", [])
+                results["lipids"]["total"] = lip_result.get("total", 0)
+            else:
+                logger.error(f"Lipid search error: {lip_result['error']}")
+        except Exception as e:
+            logger.error(f"Unexpected error in lipid search: {e}")
     
     return results
 
@@ -849,7 +1209,7 @@ st.set_page_config(
 _inject_base_css()
 
 # Проверка наличия баз данных
-db_files = [METABOLITES_DB_PATH, ENZYMES_DB_PATH, PROTEINS_DB_PATH]
+db_files = [METABOLITES_DB_PATH, ENZYMES_DB_PATH, PROTEINS_DB_PATH, CARBOHYDRATES_DB_PATH, LIPIDS_DB_PATH]
 missing_dbs = [f for f in db_files if not os.path.exists(f)]
 
 if missing_dbs:
@@ -866,7 +1226,7 @@ if missing_dbs:
     st.stop()
 
 st.title("🧬 Справочник соединений")
-st.markdown("**Унифицированный поиск по метаболитам, ферментам и белкам**", help="Поиск по всем типам соединений в одной форме")
+st.markdown("**Унифицированный поиск по метаболитам, ферментам, белкам, углеводам и липидам**", help="Поиск по всем типам соединений в одной форме")
 
 # Статус баз данных
 totals = _get_totals()
@@ -875,7 +1235,7 @@ status = totals.get("db_status", "unknown")
 # KPI-панель - отцентрированная по горизонтали
 st.markdown("### Статистика базы данных")
 st.markdown("""
-<div style="display: flex; justify-content: center; align-items: center; gap: 1rem; margin: 1rem 0;">
+<div style="display: flex; justify-content: center; align-items: center; gap: 1rem; margin: 1rem 0; flex-wrap: wrap;">
     <div style="text-align: center; padding: 0.5rem; background: rgba(255, 255, 255, 0.05); border-radius: 4px; min-width: 80px;">
         <div style="font-size: 0.8rem; color: #B0B0B0; font-weight: 500;">Метаболиты</div>
         <div style="font-size: 1.1rem; font-weight: 600; color: #FAFAFA;">{}</div>
@@ -889,6 +1249,14 @@ st.markdown("""
         <div style="font-size: 1.1rem; font-weight: 600; color: #FAFAFA;">{}</div>
     </div>
     <div style="text-align: center; padding: 0.5rem; background: rgba(255, 255, 255, 0.05); border-radius: 4px; min-width: 80px;">
+        <div style="font-size: 0.8rem; color: #B0B0B0; font-weight: 500;">Углеводы</div>
+        <div style="font-size: 1.1rem; font-weight: 600; color: #FAFAFA;">{}</div>
+    </div>
+    <div style="text-align: center; padding: 0.5rem; background: rgba(255, 255, 255, 0.05); border-radius: 4px; min-width: 80px;">
+        <div style="font-size: 0.8rem; color: #B0B0B0; font-weight: 500;">Липиды</div>
+        <div style="font-size: 1.1rem; font-weight: 600; color: #FAFAFA;">{}</div>
+    </div>
+    <div style="text-align: center; padding: 0.5rem; background: rgba(255, 255, 255, 0.05); border-radius: 4px; min-width: 80px;">
         <div style="font-size: 0.8rem; color: #B0B0B0; font-weight: 500;">Статус БД</div>
         <div style="font-size: 1.1rem; font-weight: 600; color: #FAFAFA;">{}</div>
     </div>
@@ -897,6 +1265,8 @@ st.markdown("""
     totals.get("metabolites") or "—",
     totals.get("enzymes") or "—", 
     totals.get("proteins") or "—",
+    totals.get("carbohydrates") or "—",
+    totals.get("lipids") or "—",
     "OK" if status == "healthy" else "Нет файла"
 ), unsafe_allow_html=True)
 
@@ -916,6 +1286,22 @@ if "show_enzyme_details" not in st.session_state:
     st.session_state.show_enzyme_details = False
 if "show_protein_details" not in st.session_state:
     st.session_state.show_protein_details = False
+if "search_results" not in st.session_state:
+    st.session_state.search_results = {}
+if "selected_metabolite" not in st.session_state:
+    st.session_state.selected_metabolite = None
+if "selected_enzyme" not in st.session_state:
+    st.session_state.selected_enzyme = None
+if "selected_protein" not in st.session_state:
+    st.session_state.selected_protein = None
+if "last_query" not in st.session_state:
+    st.session_state.last_query = ""
+if "last_mass" not in st.session_state:
+    st.session_state.last_mass = None
+if "last_organism_type" not in st.session_state:
+    st.session_state.last_organism_type = "Все"
+if "last_tolerance_ppm" not in st.session_state:
+    st.session_state.last_tolerance_ppm = 10
 
 # Унифицированная форма поиска
 
@@ -926,7 +1312,7 @@ with st.form("unified_search_form"):
     search_query = st.text_input(
         "Поисковый запрос",
         placeholder="Например: глюкоза, dehydrogenase, insulin",
-        help="Поиск по названию, формуле, EC номеру, функции. Нажмите Enter для быстрого поиска.",
+        help="Поиск по названию, формуле, EC номеру, функции. Запрос автоматически приводится к формату с заглавной буквы. Нажмите Enter для быстрого поиска.",
         key="search_query_input"
     )
     
@@ -939,15 +1325,15 @@ with st.form("unified_search_form"):
         
         with col1:
             mass_query = st.number_input(
-                "Масса (m/z) для поиска метаболитов",
+                "Масса (m/z) для поиска соединений",
                 min_value=0.0,
                 step=0.001,
                 format="%.6f",
-                help="Оставьте 0 для поиска только по названию.",
+                help="Поиск по массе среди метаболитов (Da), ферментов и белков (kDa). Оставьте 0 для поиска только по названию.",
                 key="mass_query_input"
             )
             
-            tolerance_ppm = st.slider("Допуск (ppm)", min_value=1, max_value=100, value=10, step=1)
+            tolerance_ppm = st.slider("Допуск (ppm)", min_value=250, max_value=10000, value=1000, step=50, help="Частей на миллион. 250 ppm = ±0.025% от массы, 1000 ppm = ±0.1% от массы, 10000 ppm = ±1% от массы")
         
         with col2:
             organism_type = st.selectbox(
@@ -979,45 +1365,43 @@ with st.form("unified_search_form"):
                 tol_ppm=10,
                 organism_type="Все",
                 page=1,
-                page_size=st.session_state.page_size
+                page_size=st.session_state.page_size or 50
             )
             st.session_state.search_results = results
             st.session_state.search_submitted = True
     with presets_col2:
-        dehydrogenase_preset = st.form_submit_button("dehydrogenase", use_container_width=True)
+        dehydrogenase_preset = st.form_submit_button("Dehydrogenase", use_container_width=True)
         if dehydrogenase_preset:
             st.session_state.page = 1
-            st.session_state.search_query = "dehydrogenase"
+            st.session_state.search_query = "Dehydrogenase"
             # Выполняем поиск для пресета
             results = _unified_search(
-                query="dehydrogenase",
+                query="Dehydrogenase",
                 mass=None,
                 tol_ppm=10,
                 organism_type="Все",
                 page=1,
-                page_size=st.session_state.page_size
+                page_size=st.session_state.page_size or 50
             )
             st.session_state.search_results = results
             st.session_state.search_submitted = True
     with presets_col3:
-        insulin_preset = st.form_submit_button("insulin", use_container_width=True)
+        insulin_preset = st.form_submit_button("Formaldehyde", use_container_width=True)
         if insulin_preset:
             st.session_state.page = 1
-            st.session_state.search_query = "insulin"
+            st.session_state.search_query = "Formaldehyde"
             # Выполняем поиск для пресета
             results = _unified_search(
-                query="insulin",
+                query="Formaldehyde",
                 mass=None,
                 tol_ppm=10,
                 organism_type="Все",
                 page=1,
-                page_size=st.session_state.page_size
+                page_size=st.session_state.page_size or 50
             )
             st.session_state.search_results = results
             st.session_state.search_submitted = True
-    
 
-    
     # Обработка поиска (работает как с кнопкой, так и с Enter)
     if search_submitted:
         st.session_state.page = 1
@@ -1025,13 +1409,15 @@ with st.form("unified_search_form"):
         
         with st.status("Выполняется поиск...", expanded=False):
             # Выполняем унифицированный поиск
+            # Если есть только масса, передаем None для запроса
+            query_to_search = search_query if search_query.strip() else None
             results = _unified_search(
-                query=search_query,
+                query=query_to_search,
                 mass=mass_query if mass_query > 0 else None,
                 tol_ppm=tolerance_ppm,
-                organism_type=organism_type,
+                organism_type=organism_type or "Все",
                 page=1,
-                page_size=st.session_state.page_size
+                page_size=st.session_state.page_size or 50
             )
             
             # Сохраняем результаты
@@ -1042,7 +1428,6 @@ with st.form("unified_search_form"):
             st.session_state.last_tolerance_ppm = tolerance_ppm
         
         st.rerun()
-    
 
 
 # Отображение результатов
@@ -1055,10 +1440,12 @@ if st.session_state.get("search_submitted", False) and st.session_state.get("sea
     total_metabolites = results.get("metabolites", {}).get("total", 0)
     total_enzymes = results.get("enzymes", {}).get("total", 0)
     total_proteins = results.get("proteins", {}).get("total", 0)
-    total_all = total_metabolites + total_enzymes + total_proteins
+    total_carbohydrates = results.get("carbohydrates", {}).get("total", 0)
+    total_lipids = results.get("lipids", {}).get("total", 0)
+    total_all = total_metabolites + total_enzymes + total_proteins + total_carbohydrates + total_lipids
     
     if total_all > 0:
-        st.success(f"✅ Найдено {total_all} результатов (метаболиты: {total_metabolites}, ферменты: {total_enzymes}, белки: {total_proteins})")
+        st.success(f"✅ Найдено {total_all} результатов (метаболиты: {total_metabolites}, ферменты: {total_enzymes}, белки: {total_proteins}, углеводы: {total_carbohydrates}, липиды: {total_lipids})")
         
         # Переключение вида
         view_choice = st.radio(
@@ -1086,8 +1473,8 @@ if st.session_state.get("search_submitted", False) and st.session_state.get("sea
                     pubchem_link = f"https://pubchem.ncbi.nlm.nih.gov/compound/{met.get('pubchem_cid')}" if met.get("pubchem_cid") else ""
                     
                     df_rows.append({
-                        "Название": met.get("name", ""),
-                        "Название (RU)": met.get("name_ru", ""),
+                        "Название": met.get("name_ru", "") or met.get("name", ""),
+                        "Название (EN)": met.get("name", ""),
                         "Формула": met.get("formula", ""),
                         "Масса": float(met["exact_mass"]) if isinstance(met.get("exact_mass"), (int, float)) else None,
                         "Класс": met.get("class_name", ""),
@@ -1151,8 +1538,8 @@ if st.session_state.get("search_submitted", False) and st.session_state.get("sea
                     expasy_link = f"https://enzyme.expasy.org/EC/{enz.get('ec_number')}" if enz.get("ec_number") else ""
                     
                     df_rows.append({
-                        "Название": enz.get("name", ""),
-                        "Название (RU)": enz.get("name_ru", ""),
+                        "Название": enz.get("name_ru", "") or enz.get("name", ""),
+                        "Название (EN)": enz.get("name", ""),
                         "EC номер": enz.get("ec_number", ""),
                         "Семейство": enz.get("family", ""),
                         "Организм": enz.get("organism", ""),
@@ -1208,8 +1595,8 @@ if st.session_state.get("search_submitted", False) and st.session_state.get("sea
                     ncbi_link = f"https://www.ncbi.nlm.nih.gov/gene/?term={prot.get('gene_name')}" if prot.get("gene_name") else ""
                     
                     df_rows.append({
-                        "Название": prot.get("name", ""),
-                        "Название (RU)": prot.get("name_ru", ""),
+                        "Название": prot.get("name_ru", "") or prot.get("name", ""),
+                        "Название (EN)": prot.get("name", ""),
                         "Функция": prot.get("function", ""),
                         "Семейство": prot.get("family", ""),
                         "Организм": prot.get("organism", ""),
@@ -1254,44 +1641,91 @@ if st.session_state.get("search_submitted", False) and st.session_state.get("sea
     else:
         st.warning("🔍 Результаты не найдены. Попробуйте изменить параметры поиска.")
 
+    # Пагинация для унифицированного поиска
+    max_results = max(total_metabolites, total_enzymes, total_proteins)
+    if max_results > st.session_state.page_size:
+        total_pages = math.ceil(max_results / st.session_state.page_size)
+        
+        st.subheader("📄 Пагинация")
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col1:
+            if st.button("⬅️ Предыдущая", key="prev_page", disabled=st.session_state.page <= 1):
+                st.session_state.page = max(1, st.session_state.page - 1)
+                # Обновляем результаты для новой страницы
+                results = _unified_search(
+                    query=st.session_state.get("last_query", ""),
+                    mass=st.session_state.get("last_mass"),
+                    tol_ppm=st.session_state.get("last_tolerance_ppm", 10),
+                    organism_type=st.session_state.get("last_organism_type", "Все"),
+                    page=st.session_state.page,
+                    page_size=st.session_state.page_size or 50
+                )
+                st.session_state.search_results = results
+                st.rerun()
+        
+        with col2:
+            st.markdown(f"Страница {st.session_state.page} из {total_pages}")
+        
+        with col3:
+            if st.button("Следующая ➡️", key="next_page", disabled=st.session_state.page >= total_pages):
+                st.session_state.page = min(total_pages, st.session_state.page + 1)
+                # Обновляем результаты для новой страницы
+                results = _unified_search(
+                    query=st.session_state.get("last_query", ""),
+                    mass=st.session_state.get("last_mass"),
+                    tol_ppm=st.session_state.get("last_tolerance_ppm", 10),
+                    organism_type=st.session_state.get("last_organism_type", "Все"),
+                    page=st.session_state.page,
+                    page_size=st.session_state.page_size or 50
+                )
+                st.session_state.search_results = results
+                st.rerun()
+
 # Отображение детальной информации
 if st.session_state.get("show_metabolite_details") and st.session_state.get("selected_metabolite"):
-    st.markdown("---")
-    st.markdown("## 📋 Детальная информация о метаболите")
-    st.markdown(f"**Выбран:** {st.session_state.selected_metabolite.get('name', 'Метаболит')}")
-    _show_metabolite_details(st.session_state.selected_metabolite)
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col2:
-        if st.button("❌ Закрыть детали", key="close_met_details", use_container_width=True):
-            st.session_state.show_metabolite_details = False
-            st.session_state.selected_metabolite = None
-            st.rerun()
+    metabolite = st.session_state.selected_metabolite
+    if metabolite and isinstance(metabolite, dict):
+        st.markdown("---")
+        st.markdown("## 📋 Детальная информация о метаболите")
+        #st.markdown(f"**Выбран:** {metabolite.get('name', 'Метаболит')}")
+        _show_metabolite_details(metabolite)
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("❌ Закрыть детали", key="close_met_details", use_container_width=True):
+                st.session_state.show_metabolite_details = False
+                st.session_state.selected_metabolite = None
+                st.rerun()
     
 
 if st.session_state.get("show_enzyme_details") and st.session_state.get("selected_enzyme"):
-    st.markdown("---")
-    st.markdown("## 📋 Детальная информация о ферменте")
-    st.markdown(f"**Выбран:** {st.session_state.selected_enzyme.get('name', 'Фермент')}")
-    _show_enzyme_details(st.session_state.selected_enzyme)
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col2:
-        if st.button("❌ Закрыть детали", key="close_enz_details", use_container_width=True):
-            st.session_state.show_enzyme_details = False
-            st.session_state.selected_enzyme = None
-            st.rerun()
+    enzyme = st.session_state.selected_enzyme
+    if enzyme and isinstance(enzyme, dict):
+        st.markdown("---")
+        st.markdown("## 📋 Детальная информация о ферменте")
+        #st.markdown(f"**Выбран:** {enzyme.get('name', 'Фермент')}")
+        _show_enzyme_details(enzyme)
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("❌ Закрыть детали", key="close_enz_details", use_container_width=True):
+                st.session_state.show_enzyme_details = False
+                st.session_state.selected_enzyme = None
+                st.rerun()
     
 
 if st.session_state.get("show_protein_details") and st.session_state.get("selected_protein"):
-    st.markdown("---")
-    st.markdown("## Детальная информация о белке")
-    st.markdown(f"**Выбран:** {st.session_state.selected_protein.get('name', 'Белок')}")
-    _show_protein_details(st.session_state.selected_protein)
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col2:
-        if st.button("❌ Закрыть детали", key="close_prot_details", use_container_width=True):
-            st.session_state.show_protein_details = False
-            st.session_state.selected_protein = None
-            st.rerun()
+    protein = st.session_state.selected_protein
+    if protein and isinstance(protein, dict):
+        #st.markdown("---")
+        st.markdown("## Детальная информация о белке")
+        #st.markdown(f"**Выбран:** {protein.get('name', 'Белок')}")
+        _show_protein_details(protein)
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("❌ Закрыть детали", key="close_prot_details", use_container_width=True):
+                st.session_state.show_protein_details = False
+                st.session_state.selected_protein = None
+                st.rerun()
     
 # Футер
 st.markdown("---")
